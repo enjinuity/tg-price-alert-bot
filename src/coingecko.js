@@ -5,6 +5,7 @@
 // 2) Fetch the USD price using the "simple/price" endpoint
 
 const COINGECKO_API_KEY = process.env.COINGECKO_API_KEY;
+const COINGECKO_BASE_URL = (process.env.COINGECKO_BASE_URL || "").trim();
 
 const coinIdCache = new Map();
 
@@ -18,10 +19,21 @@ function coingeckoHeaders() {
   };
 
   if (COINGECKO_API_KEY) {
-    headers["x-cg-pro-api-key"] = COINGECKO_API_KEY;
+    if (COINGECKO_API_KEY.startsWith("CG-")) {
+      headers["x-cg-demo-api-key"] = COINGECKO_API_KEY;
+    } else {
+      headers["x-cg-pro-api-key"] = COINGECKO_API_KEY;
+    }
   }
 
   return headers;
+}
+
+function coingeckoBaseUrl() {
+  if (COINGECKO_BASE_URL) return COINGECKO_BASE_URL.replace(/\/$/, "");
+  if (!COINGECKO_API_KEY) return "https://api.coingecko.com/api/v3";
+  if (COINGECKO_API_KEY.startsWith("CG-")) return "https://api.coingecko.com/api/v3";
+  return "https://pro-api.coingecko.com/api/v3";
 }
 
 async function resolveCoinIdBySymbol(symbolInput) {
@@ -31,7 +43,7 @@ async function resolveCoinIdBySymbol(symbolInput) {
   const cached = coinIdCache.get(symbol);
   if (cached) return cached;
 
-  const url = `https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(symbol)}`;
+  const url = `${coingeckoBaseUrl()}/search?query=${encodeURIComponent(symbol)}`;
   const res = await fetch(url, { headers: coingeckoHeaders() });
 
   if (!res.ok) {
@@ -59,7 +71,7 @@ async function getUsdPrice(symbolInput) {
   const symbol = normalizeSymbol(symbolInput);
   const coinId = await resolveCoinIdBySymbol(symbol);
 
-  const url = `https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd`;
+  const url = `${coingeckoBaseUrl()}/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd`;
   const res = await fetch(url, { headers: coingeckoHeaders() });
 
   if (!res.ok) {
@@ -79,4 +91,3 @@ async function getUsdPrice(symbolInput) {
 module.exports = {
   getUsdPrice
 };
-

@@ -64,7 +64,6 @@ bot.command("alert", async (ctx) => {
 
   try {
     const { symbol, price: currentPrice } = await getUsdPrice(parsed.symbol);
-    const direction = parsed.targetPrice > currentPrice ? "above" : "below";
 
     const alerts = await loadAlerts();
     alerts.push({
@@ -73,7 +72,7 @@ bot.command("alert", async (ctx) => {
       symbol,
       targetPrice: parsed.targetPrice,
       initialPrice: currentPrice,
-      direction,
+      lastPrice: currentPrice,
       createdAt: new Date().toISOString()
     });
     await saveAlerts(alerts);
@@ -83,7 +82,7 @@ bot.command("alert", async (ctx) => {
         `Alert saved for ${symbol}.`,
         `Current: ${formatNumber(currentPrice)}`,
         `Target:  ${formatNumber(parsed.targetPrice)}`,
-        `Trigger when price goes ${direction} the target.`,
+        "Trigger when price crosses the target (up or down).",
         `Stored in: ${ALERTS_FILE}`
       ].join("\n")
     );
@@ -103,8 +102,19 @@ bot.command("list", async (ctx) => {
   }
 
   const lines = mine.map((a, i) => {
-    const arrow = a.direction === "above" ? "↑" : "↓";
-    return `${i + 1}. ${a.symbol} ${arrow} ${formatNumber(a.targetPrice)} (created ${a.createdAt})`;
+    const last = Number.isFinite(Number(a.lastPrice))
+      ? Number(a.lastPrice)
+      : Number.isFinite(Number(a.initialPrice))
+        ? Number(a.initialPrice)
+        : NaN;
+    const side = Number.isFinite(last)
+      ? last >= Number(a.targetPrice)
+        ? "(currently above target)"
+        : "(currently below target)"
+      : "";
+
+    const lastPart = Number.isFinite(last) ? `last ${formatNumber(last)}` : "";
+    return `${i + 1}. ${a.symbol} target ${formatNumber(a.targetPrice)} ${lastPart} ${side}`.trim();
   });
 
   await ctx.reply(["Your alerts:", ...lines].join("\n"));
@@ -139,6 +149,7 @@ async function checkAlertsOnce() {
 
   const triggered = [];
   const remaining = [];
+  let didUpdate = false;
 
   for (const alert of alerts) {
     const current = pricesBySymbol.get(alert.symbol);
@@ -147,23 +158,32 @@ async function checkAlertsOnce() {
       continue;
     }
 
-    const shouldTrigger =
-      (alert.direction === "above" && current >= alert.targetPrice) ||
-      (alert.direction === "below" && current <= alert.targetPrice);
+    const target = Number(alert.targetPrice);
+    const last = Number.isFinite(Number(alert.lastPrice))
+      ? Number(alert.lastPrice)
+      : Number.isFinite(Number(alert.initialPrice))
+        ? Number(alert.initialPrice)
+        : current;
+
+    const crossedUp = last < target && current >= target;
+    const crossedDown = last > target && current <= target;
+    const shouldTrigger = crossedUp || crossedDown;
 
     if (shouldTrigger) {
-      triggered.push({ alert, current });
+      triggered.push({ alert, current, direction: crossedUp ? "above" : "below" });
     } else {
-      remaining.push(alert);
+      const nextAlert = { ...alert, lastPrice: current };
+      if (Number(alert.lastPrice) !== current) didUpdate = true;
+      remaining.push(nextAlert);
     }
   }
 
-  if (triggered.length > 0) {
+  if (triggered.length > 0 || didUpdate) {
     await saveAlerts(remaining);
   }
 
-  for (const { alert, current } of triggered) {
-    const directionWord = alert.direction === "above" ? "above" : "below";
+  for (const { alert, current, direction } of triggered) {
+    const directionWord = direction;
     const message = [
       `Alert triggered for ${alert.symbol}!`,
       `Current: ${formatNumber(current)}`,
