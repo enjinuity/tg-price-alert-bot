@@ -45,6 +45,40 @@ TELEGRAM_BOT_TOKEN=YOUR_TOKEN_HERE
 COINGECKO_API_KEY=YOUR_COINGECKO_KEY_HERE
 ```
 
+## Polling interval (optional)
+
+By default, the bot checks prices every **60 seconds**.
+
+If you want to check more frequently (helps catch fast spikes/dips), set this in `.env`:
+
+```bash
+PRICE_CHECK_INTERVAL_SECONDS=15
+```
+
+Minimum is 5 seconds.
+
+## Debug tip
+
+You can run `/check` in Telegram to force an immediate price check and see a summary.
+
+## If the bot cant connect to Telegram (timeout)
+
+If you see an error like:
+
+`Bot failed to launch ... ETIMEDOUT ... api.telegram.org`
+
+your network is blocking Telegram (or has restricted outbound access). The bot cannot run until Telegram API is reachable.
+
+Options:
+
+- Use a VPN
+- Run the bot on a server/network where Telegram is reachable
+- Use an HTTPS proxy by setting `HTTPS_PROXY` in `.env`, for example:
+
+```bash
+HTTPS_PROXY=http://127.0.0.1:7890
+```
+
 ## Run
 
 ```bash
@@ -63,3 +97,7 @@ In Telegram, open your bot and try:
 ## Where alerts are stored
 
 Alerts live in `data/alerts.json`.
+
+## Attribution
+
+Data provided by CoinGecko (https://www.coingecko.com)

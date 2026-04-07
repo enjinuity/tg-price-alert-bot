@@ -5,8 +5,11 @@
 // - /list
 // - /clear
 
+require("dns").setDefaultResultOrder("ipv4first");
+
 require("dotenv").config();
 
+const { HttpsProxyAgent } = require("https-proxy-agent");
 const { Telegraf } = require("telegraf");
 const { loadAlerts, saveAlerts, ALERTS_FILE } = require("./alertsStore");
 const { getUsdPrice } = require("./coingecko");
@@ -17,7 +20,35 @@ if (!TELEGRAM_BOT_TOKEN) {
   process.exit(1);
 }
 
-const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+const telegramOptions = {};
+const proxyUrl =
+  process.env.HTTPS_PROXY ||
+  process.env.https_proxy ||
+  process.env.TELEGRAM_HTTPS_PROXY ||
+  process.env.telegram_https_proxy;
+
+if (proxyUrl) {
+  telegramOptions.agent = new HttpsProxyAgent(proxyUrl);
+}
+
+const bot = new Telegraf(TELEGRAM_BOT_TOKEN, { telegram: telegramOptions });
+
+function getCheckIntervalMs() {
+  const raw = process.env.PRICE_CHECK_INTERVAL_SECONDS;
+  const seconds = raw ? Number(raw) : 60;
+
+  if (!Number.isFinite(seconds) || seconds <= 0) return 60_000;
+
+  const clampedSeconds = Math.min(Math.max(seconds, 5), 3600);
+  return Math.round(clampedSeconds * 1000);
+}
+
+const CHECK_INTERVAL_MS = getCheckIntervalMs();
+let checkInProgress = false;
+
+function nowStamp() {
+  return new Date().toISOString();
+}
 
 function formatNumber(n) {
   return new Intl.NumberFormat("en-US", {
@@ -49,7 +80,10 @@ bot.start(async (ctx) => {
       "Commands:",
       "/alert <symbol> <price>  (example: /alert BTC 95000)",
       "/list",
-      "/clear"
+      "/remove <number>",
+      "/clear",
+      "",
+      "Data provided by CoinGecko (https://www.coingecko.com)"
     ].join("\n")
   );
 });
@@ -83,9 +117,14 @@ bot.command("alert", async (ctx) => {
         `Current: ${formatNumber(currentPrice)}`,
         `Target:  ${formatNumber(parsed.targetPrice)}`,
         "Trigger when price crosses the target (up or down).",
+        `Checks run every ${Math.round(CHECK_INTERVAL_MS / 1000)}s.`,
         `Stored in: ${ALERTS_FILE}`
       ].join("\n")
     );
+
+    setTimeout(() => {
+      checkAlertsOnce({ reason: "new-alert" }).catch((err) => console.error("New alert check failed:", err));
+    }, 1500);
   } catch (err) {
     await ctx.reply(`Could not create alert: ${err.message}`);
   }
@@ -120,6 +159,32 @@ bot.command("list", async (ctx) => {
   await ctx.reply(["Your alerts:", ...lines].join("\n"));
 });
 
+bot.command("remove", async (ctx) => {
+  const chatId = ctx.chat.id;
+  const parts = String(ctx.message?.text || "").trim().split(/\s+/);
+  const index = Number(parts[1]);
+
+  if (!Number.isInteger(index) || index <= 0) {
+    await ctx.reply("Usage: /remove <number> (see /list)");
+    return;
+  }
+
+  const alerts = await loadAlerts();
+  const mine = alerts.filter((a) => a.chatId === chatId);
+
+  const alertToRemove = mine[index - 1];
+  if (!alertToRemove) {
+    await ctx.reply("That number does not match any alert. Use /list to see numbers.");
+    return;
+  }
+
+  const remaining = alerts.filter((a) => a.id !== alertToRemove.id);
+  await saveAlerts(remaining);
+  await ctx.reply(
+    `Removed alert #${index}: ${alertToRemove.symbol} target ${formatNumber(alertToRemove.targetPrice)}.`
+  );
+});
+
 bot.command("clear", async (ctx) => {
   const chatId = ctx.chat.id;
   const alerts = await loadAlerts();
@@ -131,85 +196,153 @@ bot.command("clear", async (ctx) => {
   await ctx.reply(`Removed ${removedCount} alert(s).`);
 });
 
-async function checkAlertsOnce() {
-  const alerts = await loadAlerts();
-  if (alerts.length === 0) return;
+bot.command("check", async (ctx) => {
+  const result = await checkAlertsOnce({ reason: "manual" });
+  await ctx.reply(
+    `Checked prices. Alerts: ${result.totalAlerts}, updated: ${result.updatedAlerts}, triggered: ${result.triggeredAlerts}.`
+  );
+});
 
-  const uniqueSymbols = [...new Set(alerts.map((a) => a.symbol))];
-  const pricesBySymbol = new Map();
+async function checkAlertsOnce({ reason } = {}) {
+  if (checkInProgress) {
+    return {
+      totalAlerts: 0,
+      updatedAlerts: 0,
+      triggeredAlerts: 0,
+      skipped: true
+    };
+  }
 
-  for (const symbol of uniqueSymbols) {
+  checkInProgress = true;
+
+  try {
+    const alerts = await loadAlerts();
+    if (alerts.length === 0) {
+      return { totalAlerts: 0, updatedAlerts: 0, triggeredAlerts: 0 };
+    }
+
+    console.log(`[${nowStamp()}] check start (${reason || "interval"}) alerts=${alerts.length}`);
+
+    const uniqueSymbols = [...new Set(alerts.map((a) => a.symbol))];
+    const pricesBySymbol = new Map();
+
+    for (const symbol of uniqueSymbols) {
+      try {
+        const { price } = await getUsdPrice(symbol);
+        pricesBySymbol.set(symbol, price);
+      } catch (err) {
+        console.error(`Price fetch failed for ${symbol}:`, err.message);
+      }
+    }
+
+    const triggered = [];
+    const nextAlerts = [];
+    let didUpdate = false;
+    let updatedAlerts = 0;
+
+    for (const alert of alerts) {
+      const current = pricesBySymbol.get(alert.symbol);
+      if (!Number.isFinite(current)) {
+        nextAlerts.push(alert);
+        continue;
+      }
+
+      const target = Number(alert.targetPrice);
+      const last = Number.isFinite(Number(alert.lastPrice))
+        ? Number(alert.lastPrice)
+        : Number.isFinite(Number(alert.initialPrice))
+          ? Number(alert.initialPrice)
+          : current;
+
+      const crossedUp = last < target && current >= target;
+      const crossedDown = last > target && current <= target;
+      const shouldTrigger = crossedUp || crossedDown;
+
+      if (shouldTrigger) {
+        triggered.push({ alert, current, direction: crossedUp ? "above" : "below" });
+      } else {
+        const nextAlert = { ...alert, lastPrice: current };
+        if (Number(alert.lastPrice) !== current) {
+          didUpdate = true;
+          updatedAlerts += 1;
+        }
+        nextAlerts.push(nextAlert);
+      }
+    }
+
+    let triggeredAlerts = 0;
+
+    for (const { alert, current, direction } of triggered) {
+      const message = [
+        `Alert triggered for ${alert.symbol}!`,
+        `Current: ${formatNumber(current)}`,
+        `Target:  ${formatNumber(alert.targetPrice)}`,
+        `Price is now ${direction} your target.`,
+        "(This alert was removed.)"
+      ].join("\n");
+
+      try {
+        await bot.telegram.sendMessage(alert.chatId, message);
+        triggeredAlerts += 1;
+      } catch (err) {
+        nextAlerts.push(alert);
+        console.error("Failed to send Telegram message:", err.message);
+      }
+    }
+
+    if (triggeredAlerts > 0 || didUpdate || triggeredAlerts !== triggered.length) {
+      await saveAlerts(nextAlerts);
+    }
+
+    console.log(
+      `[${nowStamp()}] check done alerts=${alerts.length} updated=${updatedAlerts} triggered=${triggeredAlerts}/${triggered.length}`
+    );
+
+    return {
+      totalAlerts: alerts.length,
+      updatedAlerts,
+      triggeredAlerts
+    };
+  } finally {
+    checkInProgress = false;
+  }
+}
+
+console.log(
+  `Starting bot (${nowStamp()}). Price checks scheduled every ${Math.round(CHECK_INTERVAL_MS / 1000)} seconds...`
+);
+
+setTimeout(() => {
+  checkAlertsOnce({ reason: "startup" }).catch((err) => console.error("Initial check failed:", err));
+}, 2_000);
+
+setInterval(() => {
+  checkAlertsOnce({ reason: "interval" }).catch((err) => console.error("Check failed:", err));
+}, CHECK_INTERVAL_MS);
+
+async function launchWithRetry() {
+  let attempt = 0;
+
+  while (true) {
+    attempt += 1;
     try {
-      const { price } = await getUsdPrice(symbol);
-      pricesBySymbol.set(symbol, price);
+      await bot.launch();
+      console.log(`Bot launched (${nowStamp()}).`);
+      return;
     } catch (err) {
-      console.error(`Price fetch failed for ${symbol}:`, err.message);
-    }
-  }
-
-  const triggered = [];
-  const remaining = [];
-  let didUpdate = false;
-
-  for (const alert of alerts) {
-    const current = pricesBySymbol.get(alert.symbol);
-    if (!Number.isFinite(current)) {
-      remaining.push(alert);
-      continue;
-    }
-
-    const target = Number(alert.targetPrice);
-    const last = Number.isFinite(Number(alert.lastPrice))
-      ? Number(alert.lastPrice)
-      : Number.isFinite(Number(alert.initialPrice))
-        ? Number(alert.initialPrice)
-        : current;
-
-    const crossedUp = last < target && current >= target;
-    const crossedDown = last > target && current <= target;
-    const shouldTrigger = crossedUp || crossedDown;
-
-    if (shouldTrigger) {
-      triggered.push({ alert, current, direction: crossedUp ? "above" : "below" });
-    } else {
-      const nextAlert = { ...alert, lastPrice: current };
-      if (Number(alert.lastPrice) !== current) didUpdate = true;
-      remaining.push(nextAlert);
-    }
-  }
-
-  if (triggered.length > 0 || didUpdate) {
-    await saveAlerts(remaining);
-  }
-
-  for (const { alert, current, direction } of triggered) {
-    const directionWord = direction;
-    const message = [
-      `Alert triggered for ${alert.symbol}!`,
-      `Current: ${formatNumber(current)}`,
-      `Target:  ${formatNumber(alert.targetPrice)}`,
-      `Price is now ${directionWord} your target.`,
-      "(This alert was removed.)"
-    ].join("\n");
-
-    try {
-      await bot.telegram.sendMessage(alert.chatId, message);
-    } catch (err) {
-      console.error("Failed to send Telegram message:", err.message);
+      const delayMs = Math.min(60_000, attempt * 10_000);
+      console.error("Bot failed to launch:", err);
+      console.error(
+        `This usually means your network can't reach Telegram (or Telegram is blocked). If needed, set HTTPS_PROXY in .env. Retrying in ${Math.round(
+          delayMs / 1000
+        )}s...`
+      );
+      await new Promise((r) => setTimeout(r, delayMs));
     }
   }
 }
 
-bot.launch().then(() => {
-  console.log("Bot started. Checking prices every 60 seconds...");
-  setInterval(() => {
-    checkAlertsOnce().catch((err) => console.error("Check failed:", err));
-  }, 60_000);
-
-  setTimeout(() => {
-    checkAlertsOnce().catch((err) => console.error("Initial check failed:", err));
-  }, 2_000);
-});
+launchWithRetry();
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
