@@ -92,7 +92,10 @@ In Telegram, open your bot and try:
 - `/start`
 - `/alert BTC 95000`
 - `/list`
+- `/remove 1`
 - `/clear`
+
+Tip: `/start` also shows a simple menu (buttons) for common actions.
 
 ## Where alerts are stored
 

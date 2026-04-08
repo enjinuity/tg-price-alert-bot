@@ -10,7 +10,7 @@ require("dns").setDefaultResultOrder("ipv4first");
 require("dotenv").config();
 
 const { HttpsProxyAgent } = require("https-proxy-agent");
-const { Telegraf } = require("telegraf");
+const { Telegraf, session, Markup } = require("telegraf");
 const { loadAlerts, saveAlerts, ALERTS_FILE } = require("./alertsStore");
 const { getUsdPrice } = require("./coingecko");
 
@@ -32,6 +32,8 @@ if (proxyUrl) {
 }
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN, { telegram: telegramOptions });
+
+bot.use(session());
 
 function getCheckIntervalMs() {
   const raw = process.env.PRICE_CHECK_INTERVAL_SECONDS;
@@ -72,39 +74,40 @@ function parseAlertCommand(text) {
   return { ok: true, symbol, targetPrice: target };
 }
 
-bot.start(async (ctx) => {
-  await ctx.reply(
-    [
-      "Welcome! I can alert you when a crypto price crosses a target.",
-      "",
-      "Commands:",
-      "/alert <symbol> <price>  (example: /alert BTC 95000)",
-      "/list",
-      "/remove <number>",
-      "/clear",
-      "",
-      "Data provided by CoinGecko (https://www.coingecko.com)"
-    ].join("\n")
-  );
-});
+function parseSymbolAndPrice(text) {
+  const parts = String(text || "").trim().split(/\s+/);
+  const symbol = parts[0];
+  const target = Number(parts[1]);
 
-bot.command("alert", async (ctx) => {
-  const chatId = ctx.chat.id;
-  const parsed = parseAlertCommand(ctx.message?.text);
-  if (!parsed.ok) {
-    await ctx.reply("Usage: /alert <symbol> <price> (example: /alert BTC 95000)");
-    return;
+  if (!symbol || !Number.isFinite(target)) {
+    return { ok: false };
   }
 
+  return { ok: true, symbol, targetPrice: target };
+}
+
+function menuKeyboard() {
+  return Markup.keyboard([
+    ["Create alert", "List alerts"],
+    ["Remove alert", "Clear alerts"],
+    ["Help"]
+  ])
+    .resize()
+    .selective();
+}
+
+async function handleCreateAlert(ctx, symbol, targetPrice) {
+  const chatId = ctx.chat.id;
+
   try {
-    const { symbol, price: currentPrice } = await getUsdPrice(parsed.symbol);
+    const { symbol: normalizedSymbol, price: currentPrice } = await getUsdPrice(symbol);
 
     const alerts = await loadAlerts();
     alerts.push({
       id: makeAlertId(),
       chatId,
-      symbol,
-      targetPrice: parsed.targetPrice,
+      symbol: normalizedSymbol,
+      targetPrice,
       initialPrice: currentPrice,
       lastPrice: currentPrice,
       createdAt: new Date().toISOString()
@@ -113,9 +116,9 @@ bot.command("alert", async (ctx) => {
 
     await ctx.reply(
       [
-        `Alert saved for ${symbol}.`,
+        `Alert saved for ${normalizedSymbol}.`,
         `Current: ${formatNumber(currentPrice)}`,
-        `Target:  ${formatNumber(parsed.targetPrice)}`,
+        `Target:  ${formatNumber(targetPrice)}`,
         "Trigger when price crosses the target (up or down).",
         `Checks run every ${Math.round(CHECK_INTERVAL_MS / 1000)}s.`,
         `Stored in: ${ALERTS_FILE}`
@@ -128,9 +131,9 @@ bot.command("alert", async (ctx) => {
   } catch (err) {
     await ctx.reply(`Could not create alert: ${err.message}`);
   }
-});
+}
 
-bot.command("list", async (ctx) => {
+async function handleListAlerts(ctx) {
   const chatId = ctx.chat.id;
   const alerts = await loadAlerts();
   const mine = alerts.filter((a) => a.chatId === chatId);
@@ -157,18 +160,10 @@ bot.command("list", async (ctx) => {
   });
 
   await ctx.reply(["Your alerts:", ...lines].join("\n"));
-});
+}
 
-bot.command("remove", async (ctx) => {
+async function handleRemoveAlertByIndex(ctx, index) {
   const chatId = ctx.chat.id;
-  const parts = String(ctx.message?.text || "").trim().split(/\s+/);
-  const index = Number(parts[1]);
-
-  if (!Number.isInteger(index) || index <= 0) {
-    await ctx.reply("Usage: /remove <number> (see /list)");
-    return;
-  }
-
   const alerts = await loadAlerts();
   const mine = alerts.filter((a) => a.chatId === chatId);
 
@@ -183,6 +178,111 @@ bot.command("remove", async (ctx) => {
   await ctx.reply(
     `Removed alert #${index}: ${alertToRemove.symbol} target ${formatNumber(alertToRemove.targetPrice)}.`
   );
+}
+
+async function sendHelp(ctx) {
+  await ctx.reply(
+    [
+      "Commands:",
+      "/alert <symbol> <price>  (example: /alert BTC 95000)",
+      "/list",
+      "/remove <number>",
+      "/clear",
+      "/menu",
+      "",
+      `Checks run every ${Math.round(CHECK_INTERVAL_MS / 1000)}s.`,
+      "",
+      "Data provided by CoinGecko (https://www.coingecko.com)"
+    ].join("\n"),
+    menuKeyboard()
+  );
+}
+
+bot.start(async (ctx) => {
+  await ctx.reply(
+    "Welcome! Use the menu below, or type /help for commands.",
+    menuKeyboard()
+  );
+  await sendHelp(ctx);
+});
+
+bot.command("help", sendHelp);
+
+bot.command("menu", async (ctx) => {
+  await ctx.reply("Menu enabled.", menuKeyboard());
+});
+
+bot.hears("Help", sendHelp);
+
+bot.hears("Create alert", async (ctx) => {
+  ctx.session.flow = { type: "create_alert" };
+  await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000)");
+});
+
+bot.hears("List alerts", async (ctx) => {
+  await handleListAlerts(ctx);
+});
+
+bot.hears("Remove alert", async (ctx) => {
+  ctx.session.flow = { type: "remove_alert" };
+  await ctx.reply("Send the alert number to remove (see /list). Example: 2");
+});
+
+bot.hears("Clear alerts", async (ctx) => {
+  await ctx.reply(
+    "Clear ALL your alerts?",
+    Markup.inlineKeyboard([
+      Markup.button.callback("Yes, clear", "clear_yes"),
+      Markup.button.callback("Cancel", "clear_no")
+    ])
+  );
+});
+
+bot.action("clear_yes", async (ctx) => {
+  try {
+    const chatId = ctx.chat.id;
+    const alerts = await loadAlerts();
+    const remaining = alerts.filter((a) => a.chatId !== chatId);
+    const removedCount = alerts.length - remaining.length;
+    await saveAlerts(remaining);
+    await ctx.editMessageText(`Removed ${removedCount} alert(s).`);
+  } catch {
+    await ctx.reply("Could not clear alerts.");
+  }
+});
+
+bot.action("clear_no", async (ctx) => {
+  try {
+    await ctx.editMessageText("Canceled.");
+  } catch {
+    await ctx.reply("Canceled.");
+  }
+});
+
+bot.command("alert", async (ctx) => {
+  const parsed = parseAlertCommand(ctx.message?.text);
+  if (!parsed.ok) {
+    await ctx.reply("Usage: /alert <symbol> <price> (example: /alert BTC 95000)");
+    return;
+  }
+
+  await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice);
+});
+
+bot.command("list", async (ctx) => {
+  await handleListAlerts(ctx);
+});
+
+bot.command("remove", async (ctx) => {
+  const parts = String(ctx.message?.text || "").trim().split(/\s+/);
+  const index = Number(parts[1]);
+
+  if (!Number.isInteger(index) || index <= 0) {
+    await ctx.reply("Usage: /remove <number> (see /list)");
+    return;
+  }
+
+  await handleRemoveAlertByIndex(ctx, index);
 });
 
 bot.command("clear", async (ctx) => {
@@ -194,6 +294,41 @@ bot.command("clear", async (ctx) => {
 
   await saveAlerts(remaining);
   await ctx.reply(`Removed ${removedCount} alert(s).`);
+});
+
+bot.on("text", async (ctx, next) => {
+  const flow = ctx.session.flow;
+  const text = String(ctx.message?.text || "").trim();
+
+  if (!flow || text.startsWith("/")) {
+    return next();
+  }
+
+  if (flow.type === "create_alert") {
+    const parsed = parseSymbolAndPrice(text);
+    if (!parsed.ok) {
+      await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000)");
+      return;
+    }
+
+    ctx.session.flow = null;
+    await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice);
+    return;
+  }
+
+  if (flow.type === "remove_alert") {
+    const n = Number(text);
+    if (!Number.isInteger(n) || n <= 0) {
+      await ctx.reply("Send a number from /list. Example: 2");
+      return;
+    }
+
+    ctx.session.flow = null;
+    await handleRemoveAlertByIndex(ctx, n);
+    return;
+  }
+
+  return next();
 });
 
 bot.command("check", async (ctx) => {
