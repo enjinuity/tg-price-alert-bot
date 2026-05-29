@@ -7,6 +7,7 @@ It stores alerts in a local JSON file and checks prices every n seconds using th
 ## Features
 
 - `/start` — show help
+- `/status` — show bot status (polling interval, alert count, proxy)
 - `/alert <symbol> <price>` — create an alert
   - Example: `/alert BTC 95000`
 - `/alert <symbol> above <price>` — trigger when price crosses above the target
@@ -95,6 +96,7 @@ In Telegram, open your bot and try:
 
 - `/start`
 - `/price BTC`
+- `/status`
 - `/alert BTC 95000`
 - `/alert BTC above 95000`
 - `/list`

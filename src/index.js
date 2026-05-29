@@ -58,6 +58,8 @@ function getCheckIntervalMs() {
 
 const CHECK_INTERVAL_MS = getCheckIntervalMs();
 let checkInProgress = false;
+const MAX_ALERTS_PER_CHAT = 25;
+const STARTED_AT = Date.now();
 
 function nowStamp() {
   return new Date().toISOString();
@@ -130,6 +132,23 @@ function menuKeyboard() {
     .selective();
 }
 
+function coingeckoKeyType() {
+  const key = process.env.COINGECKO_API_KEY;
+  if (!key) return "none";
+  if (key.startsWith("CG-")) return "demo";
+  return "pro";
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
 async function handleGetPrice(ctx, symbol) {
   try {
     const { symbol: normalizedSymbol, price } = await getUsdPrice(symbol);
@@ -147,6 +166,30 @@ async function handleCreateAlert(ctx, symbol, targetPrice, mode) {
     const { symbol: normalizedSymbol, price: currentPrice } = await getUsdPrice(symbol);
 
     const alerts = await loadAlerts();
+    const mine = alerts.filter((a) => a.chatId === chatId);
+    if (mine.length >= MAX_ALERTS_PER_CHAT) {
+      await ctx.reply(
+        `You already have ${mine.length} alerts. Limit is ${MAX_ALERTS_PER_CHAT}. Remove one with /remove or /clear.`
+      );
+      return;
+    }
+
+    const alreadyExists = alerts.some(
+      (a) =>
+        a.chatId === chatId &&
+        a.symbol === normalizedSymbol &&
+        Number(a.targetPrice) === Number(targetPrice) &&
+        (a.mode || "cross") === alertMode
+    );
+    if (alreadyExists) {
+      await ctx.reply(
+        `That alert already exists: ${normalizedSymbol} ${(alertMode === "above" ? "above" : alertMode === "below" ? "below" : "cross")} ${formatNumber(
+          targetPrice
+        )}.`
+      );
+      return;
+    }
+
     alerts.push({
       id: makeAlertId(),
       chatId,
@@ -245,6 +288,7 @@ async function sendHelp(ctx) {
       "/list",
       "/remove <number>",
       "/clear",
+      "/status",
       "/menu",
       "",
       `Checks run every ${Math.round(CHECK_INTERVAL_MS / 1000)}s.`,
@@ -344,6 +388,27 @@ bot.command("price", async (ctx) => {
     return;
   }
   await handleGetPrice(ctx, symbol);
+});
+
+bot.command("status", async (ctx) => {
+  const alerts = await loadAlerts();
+  const chatId = ctx.chat.id;
+  const mine = alerts.filter((a) => a.chatId === chatId);
+
+  const proxyEnabled = Boolean(proxyUrl);
+  const seconds = Math.round(CHECK_INTERVAL_MS / 1000);
+  const uptime = formatDurationMs(Date.now() - STARTED_AT);
+
+  await ctx.reply(
+    [
+      "Status:",
+      `Alerts: ${mine.length}/${MAX_ALERTS_PER_CHAT}`,
+      `Polling: every ${seconds}s`,
+      `CoinGecko key: ${coingeckoKeyType()}`,
+      `HTTPS proxy: ${proxyEnabled ? "enabled" : "disabled"}`,
+      `Uptime: ${uptime}`
+    ].join("\n")
+  );
 });
 
 bot.command("list", async (ctx) => {
