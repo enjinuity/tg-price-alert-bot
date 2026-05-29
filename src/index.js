@@ -33,7 +33,18 @@ if (proxyUrl) {
 
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN, { telegram: telegramOptions });
 
-bot.use(session());
+bot.use(
+  session({
+    defaultSession: () => ({})
+  })
+);
+
+bot.catch((err, ctx) => {
+  console.error("Bot error:", err);
+  if (ctx?.update) {
+    console.error("Update:", ctx.update);
+  }
+});
 
 function getCheckIntervalMs() {
   const raw = process.env.PRICE_CHECK_INTERVAL_SECONDS;
@@ -65,39 +76,72 @@ function makeAlertId() {
 function parseAlertCommand(text) {
   const parts = String(text || "").trim().split(/\s+/);
   const symbol = parts[1];
-  const target = Number(parts[2]);
 
-  if (!symbol || !Number.isFinite(target)) {
+  if (!symbol) return { ok: false };
+
+  if (parts.length === 3) {
+    const target = Number(parts[2]);
+    if (!Number.isFinite(target)) return { ok: false };
+    return { ok: true, symbol, targetPrice: target, mode: "cross" };
+  }
+
+  if (parts.length === 4) {
+    const direction = String(parts[2] || "").trim().toLowerCase();
+    const target = Number(parts[3]);
+    if (!Number.isFinite(target)) return { ok: false };
+    if (direction === "above") return { ok: true, symbol, targetPrice: target, mode: "above" };
+    if (direction === "below") return { ok: true, symbol, targetPrice: target, mode: "below" };
     return { ok: false };
   }
 
-  return { ok: true, symbol, targetPrice: target };
+  return { ok: false };
 }
 
 function parseSymbolAndPrice(text) {
   const parts = String(text || "").trim().split(/\s+/);
   const symbol = parts[0];
-  const target = Number(parts[1]);
+  if (!symbol) return { ok: false };
 
-  if (!symbol || !Number.isFinite(target)) {
+  if (parts.length === 2) {
+    const target = Number(parts[1]);
+    if (!Number.isFinite(target)) return { ok: false };
+    return { ok: true, symbol, targetPrice: target, mode: "cross" };
+  }
+
+  if (parts.length === 3) {
+    const direction = String(parts[1] || "").trim().toLowerCase();
+    const target = Number(parts[2]);
+    if (!Number.isFinite(target)) return { ok: false };
+    if (direction === "above") return { ok: true, symbol, targetPrice: target, mode: "above" };
+    if (direction === "below") return { ok: true, symbol, targetPrice: target, mode: "below" };
     return { ok: false };
   }
 
-  return { ok: true, symbol, targetPrice: target };
+  return { ok: false };
 }
 
 function menuKeyboard() {
   return Markup.keyboard([
-    ["Create alert", "List alerts"],
-    ["Remove alert", "Clear alerts"],
-    ["Help"]
+    ["Get price", "List alerts"],
+    ["Create alert", "Remove alert"],
+    ["Clear alerts", "Help"]
   ])
     .resize()
     .selective();
 }
 
-async function handleCreateAlert(ctx, symbol, targetPrice) {
+async function handleGetPrice(ctx, symbol) {
+  try {
+    const { symbol: normalizedSymbol, price } = await getUsdPrice(symbol);
+    await ctx.reply(`${normalizedSymbol} price: ${formatNumber(price)} USD`);
+  } catch (err) {
+    await ctx.reply(`Could not fetch price: ${err.message}`);
+  }
+}
+
+async function handleCreateAlert(ctx, symbol, targetPrice, mode) {
   const chatId = ctx.chat.id;
+  const alertMode = mode || "cross";
 
   try {
     const { symbol: normalizedSymbol, price: currentPrice } = await getUsdPrice(symbol);
@@ -108,18 +152,26 @@ async function handleCreateAlert(ctx, symbol, targetPrice) {
       chatId,
       symbol: normalizedSymbol,
       targetPrice,
+      mode: alertMode,
       initialPrice: currentPrice,
       lastPrice: currentPrice,
       createdAt: new Date().toISOString()
     });
     await saveAlerts(alerts);
 
+    const modeText =
+      alertMode === "above"
+        ? "Trigger when price crosses above the target."
+        : alertMode === "below"
+          ? "Trigger when price crosses below the target."
+          : "Trigger when price crosses the target (up or down).";
+
     await ctx.reply(
       [
         `Alert saved for ${normalizedSymbol}.`,
         `Current: ${formatNumber(currentPrice)}`,
         `Target:  ${formatNumber(targetPrice)}`,
-        "Trigger when price crosses the target (up or down).",
+        modeText,
         `Checks run every ${Math.round(CHECK_INTERVAL_MS / 1000)}s.`,
         `Stored in: ${ALERTS_FILE}`
       ].join("\n")
@@ -144,6 +196,8 @@ async function handleListAlerts(ctx) {
   }
 
   const lines = mine.map((a, i) => {
+    const mode = a.mode || "cross";
+    const arrow = mode === "above" ? "↑" : mode === "below" ? "↓" : "↕";
     const last = Number.isFinite(Number(a.lastPrice))
       ? Number(a.lastPrice)
       : Number.isFinite(Number(a.initialPrice))
@@ -156,7 +210,7 @@ async function handleListAlerts(ctx) {
       : "";
 
     const lastPart = Number.isFinite(last) ? `last ${formatNumber(last)}` : "";
-    return `${i + 1}. ${a.symbol} target ${formatNumber(a.targetPrice)} ${lastPart} ${side}`.trim();
+    return `${i + 1}. ${a.symbol} ${arrow} target ${formatNumber(a.targetPrice)} ${lastPart} ${side}`.trim();
   });
 
   await ctx.reply(["Your alerts:", ...lines].join("\n"));
@@ -184,7 +238,10 @@ async function sendHelp(ctx) {
   await ctx.reply(
     [
       "Commands:",
+      "/price <symbol>  (example: /price BTC)",
       "/alert <symbol> <price>  (example: /alert BTC 95000)",
+      "/alert <symbol> above <price>  (example: /alert BTC above 95000)",
+      "/alert <symbol> below <price>  (example: /alert BTC below 90000)",
       "/list",
       "/remove <number>",
       "/clear",
@@ -214,9 +271,16 @@ bot.command("menu", async (ctx) => {
 
 bot.hears("Help", sendHelp);
 
+bot.hears("Get price", async (ctx) => {
+  ctx.session = ctx.session || {};
+  ctx.session.flow = { type: "get_price" };
+  await ctx.reply("Send a symbol (example: BTC)");
+});
+
 bot.hears("Create alert", async (ctx) => {
+  ctx.session = ctx.session || {};
   ctx.session.flow = { type: "create_alert" };
-  await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000)");
+  await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000) or SYMBOL above/below PRICE (example: BTC above 95000)");
 });
 
 bot.hears("List alerts", async (ctx) => {
@@ -224,6 +288,7 @@ bot.hears("List alerts", async (ctx) => {
 });
 
 bot.hears("Remove alert", async (ctx) => {
+  ctx.session = ctx.session || {};
   ctx.session.flow = { type: "remove_alert" };
   await ctx.reply("Send the alert number to remove (see /list). Example: 2");
 });
@@ -262,11 +327,23 @@ bot.action("clear_no", async (ctx) => {
 bot.command("alert", async (ctx) => {
   const parsed = parseAlertCommand(ctx.message?.text);
   if (!parsed.ok) {
-    await ctx.reply("Usage: /alert <symbol> <price> (example: /alert BTC 95000)");
+    await ctx.reply(
+      "Usage: /alert <symbol> <price> OR /alert <symbol> above|below <price> (example: /alert BTC above 95000)"
+    );
     return;
   }
 
-  await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice);
+  await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice, parsed.mode);
+});
+
+bot.command("price", async (ctx) => {
+  const parts = String(ctx.message?.text || "").trim().split(/\s+/);
+  const symbol = parts[1];
+  if (!symbol) {
+    await ctx.reply("Usage: /price <symbol> (example: /price BTC)");
+    return;
+  }
+  await handleGetPrice(ctx, symbol);
 });
 
 bot.command("list", async (ctx) => {
@@ -304,15 +381,26 @@ bot.on("text", async (ctx, next) => {
     return next();
   }
 
+  if (flow.type === "get_price") {
+    const symbol = text.split(/\s+/)[0];
+    if (!symbol) {
+      await ctx.reply("Send a symbol (example: BTC)");
+      return;
+    }
+    ctx.session.flow = null;
+    await handleGetPrice(ctx, symbol);
+    return;
+  }
+
   if (flow.type === "create_alert") {
     const parsed = parseSymbolAndPrice(text);
     if (!parsed.ok) {
-      await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000)");
+      await ctx.reply("Send: SYMBOL PRICE (example: BTC 95000) or BTC above 95000");
       return;
     }
 
     ctx.session.flow = null;
-    await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice);
+    await handleCreateAlert(ctx, parsed.symbol, parsed.targetPrice, parsed.mode);
     return;
   }
 
@@ -383,6 +471,7 @@ async function checkAlertsOnce({ reason } = {}) {
       }
 
       const target = Number(alert.targetPrice);
+      const mode = alert.mode || "cross";
       const last = Number.isFinite(Number(alert.lastPrice))
         ? Number(alert.lastPrice)
         : Number.isFinite(Number(alert.initialPrice))
@@ -391,10 +480,12 @@ async function checkAlertsOnce({ reason } = {}) {
 
       const crossedUp = last < target && current >= target;
       const crossedDown = last > target && current <= target;
-      const shouldTrigger = crossedUp || crossedDown;
+      const shouldTrigger =
+        mode === "above" ? crossedUp : mode === "below" ? crossedDown : crossedUp || crossedDown;
 
       if (shouldTrigger) {
-        triggered.push({ alert, current, direction: crossedUp ? "above" : "below" });
+        const direction = crossedUp ? "above" : "below";
+        triggered.push({ alert, current, direction });
       } else {
         const nextAlert = { ...alert, lastPrice: current };
         if (Number(alert.lastPrice) !== current) {
@@ -408,11 +499,19 @@ async function checkAlertsOnce({ reason } = {}) {
     let triggeredAlerts = 0;
 
     for (const { alert, current, direction } of triggered) {
+      const mode = alert.mode || "cross";
+      const triggerText =
+        mode === "above"
+          ? "crossed above your target"
+          : mode === "below"
+            ? "crossed below your target"
+            : `crossed ${direction} your target`;
+
       const message = [
         `Alert triggered for ${alert.symbol}!`,
         `Current: ${formatNumber(current)}`,
         `Target:  ${formatNumber(alert.targetPrice)}`,
-        `Price is now ${direction} your target.`,
+        `Price has ${triggerText}.`,
         "(This alert was removed.)"
       ].join("\n");
 
@@ -420,7 +519,7 @@ async function checkAlertsOnce({ reason } = {}) {
         await bot.telegram.sendMessage(alert.chatId, message);
         triggeredAlerts += 1;
       } catch (err) {
-        nextAlerts.push(alert);
+        nextAlerts.push({ ...alert, lastPrice: current });
         console.error("Failed to send Telegram message:", err.message);
       }
     }

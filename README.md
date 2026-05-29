@@ -2,13 +2,17 @@
 
 A tiny Telegram bot written in Node.js using **Telegraf**.
 
-It stores alerts in a local JSON file and checks prices every 60 seconds using the **CoinGecko API**.
+It stores alerts in a local JSON file and checks prices every n seconds using the **CoinGecko API**.
 
 ## Features
 
 - `/start` — show help
 - `/alert <symbol> <price>` — create an alert
   - Example: `/alert BTC 95000`
+- `/alert <symbol> above <price>` — trigger when price crosses above the target
+  - Example: `/alert BTC above 95000`
+- `/alert <symbol> below <price>` — trigger when price crosses below the target
+  - Example: `/alert BTC below 90000`
 - `/list` — list your alerts
 - `/clear` — remove all your alerts
 
@@ -21,25 +25,25 @@ Prices are fetched in **USD** (CoinGecko). If you type `BTC`, the bot searches C
 
 ## Setup
 
-1) Install dependencies
+1. Install dependencies
 
 ```bash
 npm install
 ```
 
-2) Create your `.env`
+1. Create your `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-3) Set your token in `.env`
+1. Set your token in `.env`
 
 ```bash
 TELEGRAM_BOT_TOKEN=YOUR_TOKEN_HERE
 ```
 
-4) Set your CoinGecko API key in `.env`
+1. Set your CoinGecko API key in `.env`
 
 ```bash
 COINGECKO_API_KEY=YOUR_COINGECKO_KEY_HERE
@@ -90,7 +94,9 @@ npm start
 In Telegram, open your bot and try:
 
 - `/start`
+- `/price BTC`
 - `/alert BTC 95000`
+- `/alert BTC above 95000`
 - `/list`
 - `/remove 1`
 - `/clear`
@@ -103,4 +109,4 @@ Alerts live in `data/alerts.json`.
 
 ## Attribution
 
-Data provided by CoinGecko (https://www.coingecko.com)
+Data provided by CoinGecko (<https://www.coingecko.com>)
