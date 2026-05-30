@@ -12,7 +12,7 @@ require("dotenv").config();
 const { HttpsProxyAgent } = require("https-proxy-agent");
 const { Telegraf, session, Markup } = require("telegraf");
 const { loadAlerts, saveAlerts, ALERTS_FILE } = require("./alertsStore");
-const { getUsdPrice } = require("./coingecko");
+const { getUsdPrice, getUsdPricesByCoinIds, resolveCoinIdBySymbol } = require("./coingecko");
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 if (!TELEGRAM_BOT_TOKEN) {
@@ -163,7 +163,7 @@ async function handleCreateAlert(ctx, symbol, targetPrice, mode) {
   const alertMode = mode || "cross";
 
   try {
-    const { symbol: normalizedSymbol, price: currentPrice } = await getUsdPrice(symbol);
+    const { symbol: normalizedSymbol, coinId, price: currentPrice } = await getUsdPrice(symbol);
 
     const alerts = await loadAlerts();
     const mine = alerts.filter((a) => a.chatId === chatId);
@@ -177,7 +177,7 @@ async function handleCreateAlert(ctx, symbol, targetPrice, mode) {
     const alreadyExists = alerts.some(
       (a) =>
         a.chatId === chatId &&
-        a.symbol === normalizedSymbol &&
+        (a.coinId ? a.coinId === coinId : a.symbol === normalizedSymbol) &&
         Number(a.targetPrice) === Number(targetPrice) &&
         (a.mode || "cross") === alertMode
     );
@@ -194,6 +194,7 @@ async function handleCreateAlert(ctx, symbol, targetPrice, mode) {
       id: makeAlertId(),
       chatId,
       symbol: normalizedSymbol,
+      coinId,
       targetPrice,
       mode: alertMode,
       initialPrice: currentPrice,
@@ -511,16 +512,16 @@ async function checkAlertsOnce({ reason } = {}) {
 
     console.log(`[${nowStamp()}] check start (${reason || "interval"}) alerts=${alerts.length}`);
 
-    const uniqueSymbols = [...new Set(alerts.map((a) => a.symbol))];
-    const pricesBySymbol = new Map();
+    const uniqueCoinIds = [];
+    for (const alert of alerts) {
+      if (alert.coinId) uniqueCoinIds.push(alert.coinId);
+    }
 
-    for (const symbol of uniqueSymbols) {
-      try {
-        const { price } = await getUsdPrice(symbol);
-        pricesBySymbol.set(symbol, price);
-      } catch (err) {
-        console.error(`Price fetch failed for ${symbol}:`, err.message);
-      }
+    let pricesByCoinId = new Map();
+    try {
+      pricesByCoinId = await getUsdPricesByCoinIds(uniqueCoinIds);
+    } catch (err) {
+      console.error("Price fetch failed:", err.message);
     }
 
     const triggered = [];
@@ -529,7 +530,31 @@ async function checkAlertsOnce({ reason } = {}) {
     let updatedAlerts = 0;
 
     for (const alert of alerts) {
-      const current = pricesBySymbol.get(alert.symbol);
+      let coinId = alert.coinId;
+      if (!coinId) {
+        try {
+          coinId = await resolveCoinIdBySymbol(alert.symbol);
+          didUpdate = true;
+          alert.coinId = coinId;
+        } catch (err) {
+          console.error(`Coin id lookup failed for ${alert.symbol}:`, err.message);
+          nextAlerts.push(alert);
+          continue;
+        }
+      }
+
+      let current = pricesByCoinId.get(coinId);
+      if (!Number.isFinite(current)) {
+        try {
+          const refreshed = await getUsdPricesByCoinIds([coinId]);
+          current = refreshed.get(coinId);
+          if (Number.isFinite(current)) {
+            pricesByCoinId.set(coinId, current);
+          }
+        } catch (err) {
+          console.error(`Price fetch failed for ${alert.symbol}:`, err.message);
+        }
+      }
       if (!Number.isFinite(current)) {
         nextAlerts.push(alert);
         continue;
@@ -552,7 +577,7 @@ async function checkAlertsOnce({ reason } = {}) {
         const direction = crossedUp ? "above" : "below";
         triggered.push({ alert, current, direction });
       } else {
-        const nextAlert = { ...alert, lastPrice: current };
+        const nextAlert = { ...alert, coinId, lastPrice: current };
         if (Number(alert.lastPrice) !== current) {
           didUpdate = true;
           updatedAlerts += 1;
@@ -584,7 +609,7 @@ async function checkAlertsOnce({ reason } = {}) {
         await bot.telegram.sendMessage(alert.chatId, message);
         triggeredAlerts += 1;
       } catch (err) {
-        nextAlerts.push({ ...alert, lastPrice: current });
+        nextAlerts.push({ ...alert, coinId: alert.coinId, lastPrice: current });
         console.error("Failed to send Telegram message:", err.message);
       }
     }

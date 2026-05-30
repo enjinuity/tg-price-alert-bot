@@ -67,11 +67,11 @@ async function resolveCoinIdBySymbol(symbolInput) {
   return best.id;
 }
 
-async function getUsdPrice(symbolInput) {
-  const symbol = normalizeSymbol(symbolInput);
-  const coinId = await resolveCoinIdBySymbol(symbol);
+async function getUsdPricesByCoinIds(coinIds) {
+  const ids = Array.from(new Set((coinIds || []).map((x) => String(x || "").trim()).filter(Boolean)));
+  if (ids.length === 0) return new Map();
 
-  const url = `${coingeckoBaseUrl()}/simple/price?ids=${encodeURIComponent(coinId)}&vs_currencies=usd`;
+  const url = `${coingeckoBaseUrl()}/simple/price?ids=${encodeURIComponent(ids.join(","))}&vs_currencies=usd`;
   const res = await fetch(url, { headers: coingeckoHeaders() });
 
   if (!res.ok) {
@@ -80,14 +80,40 @@ async function getUsdPrice(symbolInput) {
   }
 
   const data = await res.json();
-  const price = Number(data?.[coinId]?.usd);
-  if (!Number.isFinite(price)) {
-    throw new Error(`No USD price available for ${symbol}`);
+  const map = new Map();
+  for (const coinId of ids) {
+    const price = Number(data?.[coinId]?.usd);
+    if (Number.isFinite(price)) {
+      map.set(coinId, price);
+    }
   }
 
+  return map;
+}
+
+async function getUsdPriceByCoinId(coinIdInput) {
+  const coinId = String(coinIdInput || "").trim();
+  if (!coinId) throw new Error("Missing coin id");
+
+  const prices = await getUsdPricesByCoinIds([coinId]);
+  const price = prices.get(coinId);
+  if (!Number.isFinite(price)) {
+    throw new Error(`No USD price available for ${coinId}`);
+  }
+
+  return { coinId, price };
+}
+
+async function getUsdPrice(symbolInput) {
+  const symbol = normalizeSymbol(symbolInput);
+  const coinId = await resolveCoinIdBySymbol(symbol);
+  const { price } = await getUsdPriceByCoinId(coinId);
   return { symbol, coinId, price };
 }
 
 module.exports = {
-  getUsdPrice
+  getUsdPrice,
+  getUsdPriceByCoinId,
+  getUsdPricesByCoinIds,
+  resolveCoinIdBySymbol
 };
