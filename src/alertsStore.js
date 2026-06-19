@@ -4,8 +4,18 @@
 const fs = require("fs/promises");
 const path = require("path");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
-const ALERTS_FILE = path.join(DATA_DIR, "alerts.json");
+const configuredAlertsFile = String(process.env.ALERTS_FILE || "").trim();
+const configuredDataDir = String(process.env.DATA_DIR || "").trim();
+
+const DATA_DIR = configuredAlertsFile
+  ? path.dirname(path.resolve(configuredAlertsFile))
+  : configuredDataDir
+    ? path.resolve(configuredDataDir)
+    : path.join(__dirname, "..", "data");
+
+const ALERTS_FILE = configuredAlertsFile
+  ? path.resolve(configuredAlertsFile)
+  : path.join(DATA_DIR, "alerts.json");
 
 async function ensureStorageExists() {
   await fs.mkdir(DATA_DIR, { recursive: true });

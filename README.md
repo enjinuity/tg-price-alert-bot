@@ -62,6 +62,24 @@ PRICE_CHECK_INTERVAL_SECONDS=15
 
 Minimum is 5 seconds.
 
+## Storage path (optional)
+
+By default, alerts are stored in `data/alerts.json`.
+
+If you want to store alerts somewhere else, you can set either of these in `.env`:
+
+```bash
+DATA_DIR=/absolute/path/to/data-directory
+```
+
+or:
+
+```bash
+ALERTS_FILE=/absolute/path/to/alerts.json
+```
+
+`ALERTS_FILE` takes priority over `DATA_DIR`.
+
 ## Debug tip
 
 You can run `/check` in Telegram to force an immediate price check and see a summary.
@@ -90,6 +108,22 @@ HTTPS_PROXY=http://127.0.0.1:7890
 npm start
 ```
 
+## Railway deploy note
+
+If you deploy on Railway and want alerts to survive redeploys/restarts:
+
+1. Add a Railway Volume to your service
+2. Use the volume mount path as `DATA_DIR`
+3. Redeploy after saving the variable
+
+Example:
+
+```bash
+DATA_DIR=/data
+```
+
+If your Railway volume is mounted somewhere else, use that mount path instead.
+
 ## Usage
 
 In Telegram, open your bot and try:
@@ -107,7 +141,7 @@ Tip: `/start` also shows a simple menu (buttons) for common actions.
 
 ## Where alerts are stored
 
-Alerts live in `data/alerts.json`.
+Alerts live in `data/alerts.json` by default, or in the path configured by `DATA_DIR` or `ALERTS_FILE`.
 
 ## Attribution
 
